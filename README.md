@@ -92,11 +92,12 @@ Unregister-ScheduledTask -TaskName NetworkAutoLogin -Confirm:$false
 
 | 命令 | 说明 |
 |------|------|
-| `setup`  | 交互式配置门户 URL、账号、密码 |
+| `setup`  | 交互式配置门户 URL、账号、密码（会弹出一个专属控制台窗口录入）|
 | `run`    | 决策并按需登录（计划任务调用，默认命令）|
 | `login`  | 立即强制刷新（注销 → 重登）|
-| `status` | 查看上次登录时间、距下次刷新天数等 |
-| `probe`  | 仅探测当前网络状态（Online / CaptivePortal / Offline）|
+
+> 程序以 **WinExe（GUI 子系统）** 构建，计划任务后台运行时**不会弹出黑色控制台窗口**。
+> `run`/`login` 的运行情况（含「距下次刷新约 N 天」）都写入日志文件，自行查看即可。
 
 ---
 

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using NetworkAutoLogin;
 
 // 退出码：0 = 正常（无需动作 / 登录成功）；1 = 失败/异常；2 = 配置缺失。
@@ -7,8 +8,8 @@ internal static class App
 {
     public static async Task<int> RunAsync(string[] args)
     {
-        try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* 重定向时可能失败，忽略 */ }
-
+        // WinExe 无控制台：run/login 只写文件日志，无需控制台；
+        // 需要交互的命令（setup/usage）各自调用 EnsureConsole 开专属控制台窗口。
         AppPaths.EnsureDirectories();
         var command = args.Length > 0 ? args[0].ToLowerInvariant() : "run";
 
@@ -17,8 +18,6 @@ internal static class App
             return command switch
             {
                 "setup"  => Setup(),
-                "status" => Status(),
-                "probe"  => await Probe(),
                 "login"  => await RunDecision(forceRefresh: true),
                 "run"    => await RunDecision(forceRefresh: false),
                 _        => Usage(),
@@ -31,8 +30,33 @@ internal static class App
         }
     }
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AllocConsole();
+
+    /// <summary>WinExe 无控制台；交互命令调用此方法开一个专属控制台窗口并设 UTF-8 编码。</summary>
+    private static void EnsureConsole()
+    {
+        AllocConsole();
+        try
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            Console.InputEncoding = System.Text.Encoding.UTF8;
+        }
+        catch { /* 编码设置失败不致命 */ }
+    }
+
+    /// <summary>交互命令结尾暂停，避免专属控制台窗口一闪而过看不到结果。</summary>
+    private static void PauseBeforeExit()
+    {
+        Console.WriteLine();
+        Console.Write("按任意键退出…");
+        try { Console.ReadKey(intercept: true); } catch { /* 无控制台时忽略 */ }
+        Console.WriteLine();
+    }
+
     private static int Usage()
     {
+        EnsureConsole();
         Console.WriteLine("""
             NetworkAutoLogin —— 浙大校园网自动重登
 
@@ -40,15 +64,22 @@ internal static class App
               NetworkAutoLogin setup     交互式配置门户地址与账号密码
               NetworkAutoLogin run       决策并按需登录（计划任务调用，默认命令）
               NetworkAutoLogin login     立即强制刷新（注销→重登）
-              NetworkAutoLogin status    查看当前状态
-              NetworkAutoLogin probe     仅探测当前网络状态
             """);
+        PauseBeforeExit();
         return 0;
     }
 
     // ---- setup ----------------------------------------------------------
 
     private static int Setup()
+    {
+        EnsureConsole();        // WinExe 无控制台，开一个专属窗口录入
+        var code = SetupCore();
+        PauseBeforeExit();      // 暂停以便看到保存结果
+        return code;
+    }
+
+    private static int SetupCore()
     {
         Console.WriteLine("=== NetworkAutoLogin 配置 ===");
 
@@ -103,43 +134,6 @@ internal static class App
         return buffer.ToString();
     }
 
-    // ---- status ---------------------------------------------------------
-
-    private static int Status()
-    {
-        var config = Config.LoadOrDefault();
-        var state = LoginState.Load();
-
-        Console.WriteLine("=== 状态 ===");
-        Console.WriteLine($"数据目录   : {AppPaths.DataDir}");
-        Console.WriteLine($"门户 URL   : {(string.IsNullOrEmpty(config.PortalUrl) ? "(未配置)" : config.PortalUrl)}");
-        Console.WriteLine($"凭据已保存 : {(CredentialStore.Exists() ? "是" : "否")}");
-        Console.WriteLine($"刷新阈值   : {config.RefreshThresholdDays} 天");
-
-        if (state.LastSuccessfulLoginUtc is { } t)
-        {
-            var days = state.DaysSinceLastLogin() ?? 0;
-            Console.WriteLine($"上次登录   : {t.ToLocalTime():yyyy-MM-dd HH:mm:ss}（{days:F1} 天前）");
-            Console.WriteLine($"距下次刷新 : {Math.Max(0, config.RefreshThresholdDays - days):F1} 天");
-        }
-        else
-        {
-            Console.WriteLine("上次登录   : (无记录)");
-        }
-        return 0;
-    }
-
-    // ---- probe ----------------------------------------------------------
-
-    private static async Task<int> Probe()
-    {
-        using var log = new Logger();
-        var config = Config.LoadOrDefault();
-        var status = await new NetworkProbe(config, log).CheckAsync();
-        Console.WriteLine($"网络状态：{status}");
-        return 0;
-    }
-
     // ---- 决策层 ----------------------------------------------------------
 
     private static async Task<int> RunDecision(bool forceRefresh)
@@ -181,7 +175,8 @@ internal static class App
             var status = await probe.CheckAsync();
             if (status == NetworkStatus.Online)
             {
-                log.Info($"距上次登录 {days.Value:F1} 天，未到期且在线 → 无需动作。");
+                var remain = Math.Max(0, config.RefreshThresholdDays - days.Value);
+                log.Info($"距上次登录 {days.Value:F1} 天，未到期且在线 → 无需动作。距下次刷新约 {remain:F1} 天。");
                 return 0;
             }
             if (status == NetworkStatus.Offline)
@@ -204,7 +199,7 @@ internal static class App
         }
 
         state.MarkLoginNow();
-        log.Info("登录成功，已更新时间戳。");
+        log.Info($"登录成功，已更新时间戳。下次刷新约在 {config.RefreshThresholdDays} 天后。");
 
         // 收尾确认（仅记录，不影响成功判定）。
         var confirm = await probe.CheckAsync();
